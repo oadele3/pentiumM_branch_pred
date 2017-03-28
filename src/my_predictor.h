@@ -66,25 +66,32 @@ public:
 
 class pm_predictor : public branch_predictor {
 public:
-#define LOC_TABLE_BITS	4
+#define LOC_TABLE_BITS	12
 
-#define GLO_HISTORY_LENGTH	4
-#define GLO_TABLE_BITS	2
-#define GLO_TABLE_WAY 2
+#define GLO_HISTORY_LENGTH	14
+#define GLO_TABLE_BITS	9
+#define GLO_TABLE_WAY 4
 
     pm_update u;
 	branch_info bi;
     
     unsigned char loc_tab[1<<LOC_TABLE_BITS];
 
-	unsigned char glo_tab [1<<GLO_TABLE_BITS][GLO_TABLE_WAY*3 +1]; //3colums per way + lru to store way_last_used
+	unsigned char glo_tab [1<<GLO_TABLE_BITS][GLO_TABLE_WAY*3 +GLO_TABLE_WAY]; //3colums per way +  lru columns 1 per way
 	unsigned int glo_history;
 	
         pm_predictor (void)
         {
             glo_history=0;
             memset (loc_tab, 0, sizeof (loc_tab));
-            memset (glo_tab , 0, sizeof (glo_tab[0][0])*(1<<GLO_TABLE_BITS)*(GLO_TABLE_WAY*3+1));
+            memset (glo_tab , 0, sizeof (glo_tab[0][0])*(1<<GLO_TABLE_BITS)*(GLO_TABLE_WAY*3+GLO_TABLE_WAY));
+            for (int i = 0; i < (1<<GLO_TABLE_BITS) ; i++)
+            {
+                for (int j = 0; j < GLO_TABLE_WAY; j++)
+                {
+                    glo_tab[i][GLO_TABLE_WAY*3+j] = GLO_TABLE_WAY - 1 - j;
+                }
+            }
         }
 
         branch_update *predict (branch_info & b)
@@ -95,31 +102,29 @@ public:
             {
                 //local prediction start here
                 //u.loc_index = ((b.address & ((1<<6)-1))>>2);  // using 4 address bits: 2 through 5
-                u.loc_index = (b.address & ((1<<4)-1));  // using 4 address bits: 0 through 4
+                u.loc_index = (b.address & ((1<<LOC_TABLE_BITS)-1));  // using 12 address bits: 0 through 12
                 bool loc_pred = loc_tab[u.loc_index]>>1;
 
                 //global prediction start here
                 //unsigned int hash = (glo_history & ((1<<GLO_HISTORY_LENGTH)-1)) 
 				//   ^ ((b.address & ((1<<6)-1))>>2);  // using 4 address bits 2 through 5
-
                 unsigned int hash = (glo_history & ((1<<GLO_HISTORY_LENGTH)-1)) 
-				   ^ (b.address & ((1<<4)-1));  // using 4 address bits: 0 through 4
+				   ^ (b.address & ((1<<GLO_HISTORY_LENGTH)-1));  // using 4 address bits: 0 through 4
 
-                u.glo_tag = (hash) ^ ((1<<2)-1); // tag is the 2 lower bits 0-1
-                u.glo_index = (hash >> 2) ^ ((1<<2)-1); // index is the 2 upper bits 2-3
+                u.glo_tag = (hash) ^ ((1<<(GLO_HISTORY_LENGTH - GLO_TABLE_BITS))-1); // tag is the 6 lower bits 0-5
+                u.glo_index = (hash >> (GLO_HISTORY_LENGTH - GLO_TABLE_BITS)) ^ ((1<< (GLO_TABLE_BITS))-1); // index is the 0 + 8 upper bits 6-3
                 u.glo_hit = false;
                 bool glo_pred = false;
                 for (int i = 0; i < GLO_TABLE_WAY; i++)
                 {
-                    //bool valid_x = glo_tab[u.glo_index][i*3+0];
+                    bool valid_x = glo_tab[u.glo_index][i*3+0];
                     unsigned char tag_x = glo_tab[u.glo_index][i*3+1];
                     unsigned char pred_x = glo_tab[u.glo_index][i*3+2] >> 1;
-                    if (u.glo_tag == (int)tag_x )//&& valid_x) //TODO use 1 here? for bool
+                    if (u.glo_tag == (int)tag_x  && valid_x) //TODO use 1 here? for bool
                     {
                         u.glo_hit = true;
                         u.glo_way = i;
                         glo_pred = pred_x;
-                        glo_tab[u.glo_index][GLO_TABLE_WAY*3] = (i+1)%2; //way_least_recently_used -- works for 2 way only now
                         break;
                     }
                 }
@@ -168,17 +173,46 @@ public:
                     } else {
                         if (*glo_c >0) (*glo_c)--;
                     }
+
+                    //update lru
+                    // check if way already in LRU
+                    int way_position_in_LRU = 9;
+                    for (int j = 0; j < GLO_TABLE_WAY; j++)
+                    {
+                        if (glo_tab[glo_idxx][GLO_TABLE_WAY*3+j]== glo_wayy)
+                        {
+                            way_position_in_LRU = j;
+                            break;
+                        }
+                    }
+                    if (way_position_in_LRU!=9)//should always be true
+                    {
+                        for (int k = way_position_in_LRU-1; k >= 0; k--)
+                        {
+                            glo_tab[glo_idxx][GLO_TABLE_WAY*3+k+1] = glo_tab[glo_idxx][GLO_TABLE_WAY*3+k];
+                        }
+                        glo_tab[glo_idxx][GLO_TABLE_WAY*3]=glo_wayy;
+                    }
+
                 }
                 else
                 {
                     //if no hit, put new entry
-                    unsigned char lru_way = glo_tab[glo_idxx][GLO_TABLE_WAY*3]; //way_least_recently_used way
+
+                    //1. find the LRU way 
+                    unsigned char lru_way = glo_tab[glo_idxx][GLO_TABLE_WAY*3+GLO_TABLE_WAY-1];
+                    
                     //set the valid, tag, counter on LRU way
                     glo_tab[glo_idxx][lru_way*3+0] = 1; //validd
                     glo_tab[glo_idxx][lru_way*3+1] = glo_tagg; //tagg
                     glo_tab[glo_idxx][lru_way*3+2] =0; // counter
+
                     //set new LRU way
-                    glo_tab[glo_idxx][GLO_TABLE_WAY*3] = (lru_way+1)%2;
+                    for (int k = GLO_TABLE_WAY-2; k >= 0; k--)
+                    {
+                        glo_tab[glo_idxx][GLO_TABLE_WAY*3+k+1] = glo_tab[glo_idxx][GLO_TABLE_WAY*3+k];
+                    }
+                    glo_tab[glo_idxx][GLO_TABLE_WAY*3]=lru_way;
                 }
 
                 //adjust global history here GHR (4 bit)
