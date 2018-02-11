@@ -21,7 +21,7 @@
 // Note: JECXZ/JCXZ are aliased to the opcode for JO because the traces
 // only have 4 bits for the opcode.  However, JECXZ/JCXZ occur *very*
 // infrequently in the traces, literally less than 0.00002% of the time
-// in the traces.
+// in the traces
 
 #define BR_CONDITIONAL	1
 #define BR_INDIRECT	2
